@@ -1,0 +1,19 @@
+name = "tricky_proof"
+version = "0.1.0"
+keywords = ["math", "search", "physarum"]
+defaultTargets = ["TrickyProof", "branch_flow_demo"]
+
+[leanOptions]
+pp.unicode.fun = true # pretty-prints `fun a ↦ b`
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "v4.33.1"
+
+[[lean_lib]]
+name = "TrickyProof"
+
+[[lean_exe]]
+name = "branch_flow_demo"
+root = "BranchFlowMain"

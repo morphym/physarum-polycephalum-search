@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Lean development
+        uses: leanprover/lean-action@v1
+        with:
+          build: true
+          test: false
+          lint: false
+
+      - name: Reject sorry and admit
+        run: |
+          if grep -rn --include='*.lean' -E '\b(sorry|admit)\b' . ; then
+            echo "found sorry or admit"
+            exit 1
+          fi
+
+      - name: Axiom audit
+        run: |
+          lake env lean AxiomAudit.lean | tee audit.txt
+          # The fifteen library theorems must depend on nothing beyond propext,
+          # Classical.choice and Quot.sound. Only the four diagnostic theorems
+          # may carry a native_decide axiom, and each such axiom is named after
+          # the BranchFlowDemo theorem it belongs to.
+          if [ "$(grep -c 'native_decide' audit.txt)" -ne 4 ]; then
+            echo "unexpected number of native_decide dependencies"
+            exit 1
+          fi
+          if grep 'native_decide' audit.txt | grep -qv 'BranchFlowDemo\.'; then
+            echo "a native_decide axiom appeared outside the demo theorems"
+            exit 1
+          fi
+
+      - name: Run the exact-rational diagnostic
+        run: lake exe branch_flow_demo

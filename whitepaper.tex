@@ -1,0 +1,452 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{fancyvrb}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+
+% Lean source uses ℚ, ∑, ∈, →, so the mono font must cover them.
+\IfFontExistsTF{DejaVu Sans Mono}
+  {\setmonofont{DejaVu Sans Mono}[Scale=0.85]}
+  {\IfFontExistsTF{Menlo}{\setmonofont{Menlo}[Scale=0.85]}{}}
+
+\newtheorem{theorem}{Theorem}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
+\newcommand{\lean}[1]{\texttt{#1}}
+
+\title{Physarum-Inspired Branch-Flow Search\\
+\large The machine-checked core of a self-organizing game-tree search}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Branch-flow search assigns computational traffic to complete root-to-frontier
+branches of a game tree, and lets useful traffic reinforce every edge on the
+branch it travelled. The substrate is a conductivity network borrowed from the
+slime mold \emph{Physarum polycephalum}. A move policy supplies only the
+initial conductivities, and no learned action decides where the next unit of
+computation goes.
+
+This document states what has been proved about that algorithm and nothing
+else. The Lean 4 development contains nineteen theorems. Fifteen are checked by
+the Lean kernel against its three standard axioms. Four are exact-rational
+computations discharged by \lean{native\_decide}, which also trusts the Lean
+compiler, and they are marked wherever they appear. Section~\ref{sec:notproved}
+lists what the formalization does not answer, including every question about
+playing strength.
+\end{abstract}
+
+\section{Scope}
+
+The repository holds one search algorithm. A separate line of work on learned
+computation-budget allocation is not included here.
+
+The theorems cover the algebra of the search dynamics: how conductivities are
+initialized from a policy, how branch traffic is credited, how unused routes
+decay, and how cost accumulates. They hold for any flow assignment and any
+usefulness signal meeting the stated sign conditions. That generality is what
+makes them cheap to state, and it is also what limits them. No theorem here
+says the search plays well.
+
+\section{Where the idea comes from}
+
+\emph{Physarum polycephalum} is an acellular slime mold. It feeds as one
+multinucleate cell spread into a network of protoplasmic tubes, and it has no
+brain and no central controller. It still solves shortest-path problems, by a
+local rule: tubes carrying a large flux of protoplasm thicken, and tubes
+carrying little flux thin out and disappear.
+
+Nakagaki, Yamada and T\'oth showed the organism connecting two food sources
+through the shortest route in a maze~\cite{nakagaki2000}. Tero, Kobayashi and
+Nakagaki then modelled the mechanism as a conductivity network, where each tube
+has a conductivity $D_e$ obeying
+\begin{equation}
+  \frac{dD_e}{dt} = f(|Q_e|) - D_e ,
+\end{equation}
+with $Q_e$ the flux through the tube under a Kirchhoff flow and $f$
+increasing~\cite{tero2007}. Later work reproduced the Tokyo rail network from
+the same rule~\cite{tero2010}.
+
+What is borrowed here is the feedback loop,
+\begin{equation}
+  \text{conductivity} \rightarrow \text{flow} \rightarrow \text{reinforcement}
+  \rightarrow \text{conductivity} .
+\end{equation}
+The network is never designed. It is what the traffic left behind.
+
+\section{What changes when the substrate is a game tree}
+
+A slime mold reinforces a tube in proportion to the flux through it. Flux alone
+is the wrong signal for game-tree search, because a search route can carry
+heavy traffic and learn nothing. So the reinforcement is gated by an observed
+usefulness $U_b$, measured after the branch has been searched rather than
+predicted before it.
+
+Two further commitments separate the model from ordinary tree search.
+
+The unit of traffic is a complete branch. A branch $b$ is a visited path from
+the root to a frontier or terminal node, with edge set $P_b$. A deep
+observation is evidence about every prefix decision that made the observation
+reachable, so one observation credits every edge on its route in a single
+event.
+
+The policy head sets initial conditions only. An ordinary move policy
+$\pi_\theta(a \mid s)$ supplies a branch mass
+\begin{equation}
+  m_\theta(b) = \prod_{k=1}^{d} \pi_\theta(a_k \mid s_k),
+\end{equation}
+which initializes conductivity on newly represented edges, above a positive
+exploration floor $\varepsilon$. The policy does not select which computation
+happens next, and it does not fix the final topology.
+
+The discrete update is
+\begin{equation}
+  D_e^{t+1} = \rho\, D_e^{t}
+  + \alpha \sum_{b \,:\, e \in P_b} |q_b^{t}| \, U_b^{t},
+  \qquad 0 < \rho < 1 .
+  \label{eq:update}
+\end{equation}
+Sections~\ref{sec:init} through~\ref{sec:budget} state what is proved about
+this update.
+
+\section{The formal model}
+
+The development works over arbitrary finite types \lean{Edge} and \lean{Branch}
+with rational arithmetic. Exact rationals are used throughout, so the
+executable diagnostic in Section~\ref{sec:budget} has no floating-point slack.
+
+A branch is represented by its edge set, \lean{path : Branch → Finset Edge}.
+The model fixes the bookkeeping of flow, credit and decay without committing to
+how $q_b$ and $U_b$ are computed. The four definitions that carry the model are
+these.
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+def branchPrior (localProbabilities : List ℚ) : ℚ :=
+  localProbabilities.prod
+
+noncomputable def policyConductivity
+    (path : Branch → Finset Edge) (branchMass : Branch → ℚ)
+    (explorationFloor : ℚ) (edge : Edge) : ℚ :=
+  explorationFloor +
+    ∑ branch, if edge ∈ path branch then branchMass branch else 0
+
+noncomputable def depositedTraffic
+    (path : Branch → Finset Edge) (flow usefulness : Branch → ℚ)
+    (edge : Edge) : ℚ :=
+  ∑ branch, if edge ∈ path branch then flow branch * usefulness branch else 0
+
+noncomputable def evolve
+    (path : Branch → Finset Edge) (flow usefulness : Branch → ℚ)
+    (retention learningRate : ℚ) (conductivity : Edge → ℚ)
+    (edge : Edge) : ℚ :=
+  retention * conductivity edge +
+    learningRate * depositedTraffic path flow usefulness edge
+\end{Verbatim}
+
+\lean{evolve} is equation~\eqref{eq:update}, with \lean{retention} for $\rho$
+and \lean{learningRate} for $\alpha$.
+
+\section{Policy initialization}
+\label{sec:init}
+
+\lean{branchPrior\_nil} gives the empty branch prior $1$.
+
+\lean{branchPrior\_append} gives $m(u \mathbin{+\!\!+} v) = m(u)\, m(v)$. Prefix
+masses compose, so an edge created during search can be initialized from its
+prefix without enumerating the tree.
+
+\lean{branchPrior\_extension\_le}: if $m(u) \ge 0$ and the appended probability
+lies in $[0,1]$, then $m(u \mathbin{+\!\!+} [p]) \le m(u)$. Branch priors are
+non-increasing in depth. This is the reason a product prior on its own cannot
+carry a deep line, it decays geometrically, and the exploration floor rather
+than the prior is what keeps deep edges alive.
+
+\lean{policyConductivity\_pos}: for a strictly positive floor $\varepsilon > 0$
+and nonnegative branch masses, every initialized edge has $D_e^0 > 0$.
+
+That positivity result does real work. If flow is proportional to conductivity,
+an edge initialized at exactly zero carries no flow, so it receives no deposit,
+so it stays at zero. A policy assigning probability zero to a move would then
+delete that move from the search permanently. The floor is what keeps the
+policy a prior instead of a constraint.
+
+\section{Flow bookkeeping}
+
+\lean{branchFlow\_conservation\_at\_split} takes \lean{active : Finset Branch},
+the branches through an internal node, a function
+\lean{nextChild : Branch → Child} giving the child each one continues through,
+and \lean{flow : Branch → ℚ}. It states
+\begin{equation}
+  \sum_{c} \Bigg( \sum_{b \in \mathrm{active}}
+  [\, \mathrm{nextChild}(b) = c \,] \; q_b \Bigg)
+  = \sum_{b \in \mathrm{active}} q_b .
+\end{equation}
+
+The hypothesis is worth stating plainly: each active branch continues through
+exactly one child, which is what \lean{nextChild} being a function encodes.
+The theorem is then the re-indexing identity that outgoing child traffic sums
+to incoming traffic. It is conservation in the bookkeeping sense. It is not a
+derivation of Kirchhoff's law from a graph Laplacian, and it does not show that
+any particular flow solver produces a conserved field.
+
+\section{Whole-branch credit, decay, and amplification}
+
+The single-event form isolates one transported branch.
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+def reinforceBranch (path : Finset Edge)
+    (retention learningRate flow usefulness : ℚ)
+    (conductivity : Edge → ℚ) (edge : Edge) : ℚ :=
+  retention * conductivity edge +
+    if edge ∈ path then learningRate * flow * usefulness else 0
+\end{Verbatim}
+
+\lean{reinforceBranch\_on\_path}: every edge on the branch gets the same direct
+credit, whatever its depth,
+\begin{equation}
+  D'_e - \rho D_e = \alpha \, q \, u
+  \qquad \text{for all } e \in P_b .
+\end{equation}
+
+\lean{reinforceBranch\_off\_path}: every edge off the branch gets decay and
+nothing else, $D'_e = \rho D_e$.
+
+\lean{whole\_branch\_credit}, summing over the branch,
+\begin{equation}
+  \sum_{e \in P_b} \big( D'_e - \rho D_e \big)
+  = |P_b| \cdot \alpha \, q \, u .
+  \label{eq:credit}
+\end{equation}
+
+\lean{total\_depositedTraffic} is the many-branch version, by finite double
+counting,
+\begin{equation}
+  \sum_{e} H_e = \sum_{b} |P_b| \, q_b u_b ,
+  \qquad H_e = \sum_{b \,:\, e \in P_b} q_b u_b .
+\end{equation}
+
+The factor $|P_b|$ in~\eqref{eq:credit} is easy to misread. A longer branch
+absorbs proportionally more total deposit, and that is an accounting
+consequence of crediting every edge equally, not evidence that long branches
+carry more information. If the length preference is unwanted, replace $U_b$ by
+$U_b / |P_b|$, or divide by measured branch cost. What the theorem is good for
+is forcing that choice into the open instead of leaving it inside a heuristic.
+
+\lean{depositedTraffic\_nonnegative}: nonnegative flow and nonnegative
+usefulness give $H_e \ge 0$.
+
+\lean{evolve\_positive}: with $\rho > 0$, $\alpha \ge 0$, all conductivities
+positive, and nonnegative flow and usefulness, \lean{evolve} keeps every
+conductivity strictly positive. The update never drives an edge to zero, so
+decay suppresses a route instead of deleting it, and a faded route stays
+revivable.
+
+\lean{unused\_edge\_decays}: for $D_e > 0$ and $\rho < 1$, an edge receiving no
+deposit satisfies $\rho D_e < D_e$ strictly.
+
+\lean{larger\_gain\_amplifies\_relative\_conductivity}: writing one step in
+multiplicative form $D'_e = (\rho + g_e) D_e$, if $D_A, D_B > 0$ and
+$g_B < g_A$ then
+\begin{equation}
+  D'_B \, D_A < D'_A \, D_B .
+\end{equation}
+This is the positive-feedback law. It is stated by cross-multiplication, so no
+division and no nonzero-denominator side condition appears, and the common
+retention term drops out. The edge with the larger useful-flow gain gains
+relative conductivity. It is ordered-field algebra and assumes nothing about
+where $g_A$ and $g_B$ came from, so it does not say a larger gain corresponds
+to a better move.
+
+\section{Budget as integrated traffic, and the exact diagnostic}
+\label{sec:budget}
+
+There is no learned action that spends a unit of budget. Computation is
+consumed by transport and evaluation, so the budget is an integral,
+\begin{equation}
+  B_n = \sum_{t<n} \sum_b c_b^{t} \, |q_b^{t}| .
+\end{equation}
+
+\lean{usedBudget\_append\_round}: appending a round adds its cost.
+
+\lean{usedBudget\_monotone}: with nonnegative round costs, accumulated budget is
+non-decreasing. Stopping at a measured cost is therefore well defined, and the
+procedure is anytime.
+
+\subsection*{The two-branch diagnostic}
+
+\lean{BranchFlowMain.lean} runs the dynamics on the smallest configuration that
+can show the intended behaviour. Branch A is two unit-length edges deep, branch
+B is one edge, and the policy prefers B. Retention is $\rho = 3/4$, usefulness
+is $U_A = 4$ against $U_B = 1/2$, and all arithmetic is over \lean{ℚ}.
+
+\begin{Verbatim}[fontsize=\scriptsize,xleftmargin=0pt]
+round=0, D={ aRoot := 2/5,    aDeep := 2/5,    bRoot := 3/5   }, flow(A)=1/5,    flow(B)=3/5,   cost=1
+round=1, D={ aRoot := 11/10,  aDeep := 11/10,  bRoot := 3/4   }, flow(A)=11/20,  flow(B)=3/4,   cost=37/20
+round=2, D={ aRoot := 121/40, aDeep := 121/40, bRoot := 15/16 }, flow(A)=121/80, flow(B)=15/16, cost=317/80
+\end{Verbatim}
+
+At the start $1/5 < 3/5$, so the policy's preferred shallow branch carries three
+times the traffic. The first useful observation on A credits both of its edges
+equally and raises each to $11/10$. By round two the ordering has reversed,
+\begin{equation}
+  \frac{121}{80} > \frac{15}{16},
+\end{equation}
+and the deeper branch that the policy disfavoured carries more flow. Four
+theorems pin these exact rationals:
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+initial_policy_prefers_b
+first_useful_observation_credits_both_a_edges
+useful_deep_branch_eventually_carries_more_flow
+initial_round_cost
+\end{Verbatim}
+
+This shows that whole-branch reinforcement can overturn a policy
+initialization, on one configuration, with usefulness values chosen by hand
+rather than measured from a game tree. It says the mechanism does what it is
+described as doing. It says nothing about search quality.
+
+These four theorems use \lean{native\_decide}. See Section~\ref{sec:tcb}.
+
+\section{What is not proved}
+\label{sec:notproved}
+
+The gap between the theorems above and a working engine is the whole
+engineering problem, so it is listed directly.
+
+\begin{itemize}[leftmargin=1.4em]
+  \item Nothing about playing strength. No theorem compares branch-flow search
+  with alpha-beta, PUCT MCTS, best-first policy search, or random frontier
+  expansion. Whether the coupled flow dynamics beat any of them is empirical
+  and is not settled here.
+
+  \item Nothing about the usefulness function. $U_b$ is an arbitrary
+  nonnegative rational in every theorem. That a particular $U$ correlates with
+  playing strength, or resists manipulation, is unproved, and it is the main
+  place where the design can fail.
+
+  \item Nothing about convergence. There is no theorem that the conductivity
+  field converges, that it concentrates on principal variations, or that the
+  induced root decision approaches the minimax decision.
+
+  \item No flow solver. \lean{branchFlow\_conservation\_at\_split} is a
+  re-indexing identity over a given flow assignment. No graph-Laplacian solve
+  is formalized, and no result bounds the cost of computing the flow field,
+  which the loop needs every round and which comes out of the same budget.
+
+  \item No adversarial backup. Minimax, alpha-beta bounds, and the separation
+  between the flow potential $p_v$ and the game value $V(v)$ are part of the
+  model but are not formalized here.
+
+  \item Nothing about the length preference. The $|P_b|$ factor
+  in~\eqref{eq:credit} is proved to exist. Whether it helps or hurts is not
+  addressed.
+
+  \item No claim of novelty over ant-colony or MCTS variants. If the coupled
+  flow solve is approximated by sampling one path per round and incrementing
+  edge counts, the algorithm degenerates toward existing methods. The theorems
+  here hold in both cases, so they do not distinguish them.
+\end{itemize}
+
+\section{Trusted computing base}
+\label{sec:tcb}
+
+The fifteen theorems in \lean{TrickyProof/BranchFlow.lean} depend on Lean's
+three standard axioms and nothing else:
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+propext, Classical.choice, Quot.sound
+\end{Verbatim}
+
+These are the axioms of classical higher-order logic as used throughout
+Mathlib. Trusting these results means trusting the Lean kernel, those axioms,
+and the statements being the intended ones.
+
+The four theorems in \lean{BranchFlowMain.lean} each carry one extra axiom, of
+the form
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+BranchFlowDemo.<name>._native.native_decide.ax_1_1
+\end{Verbatim}
+
+\lean{native\_decide} evaluates a decidable proposition with compiled code and
+asserts the result, so it trusts the Lean compiler and runtime on top of the
+kernel. That is a strictly larger trusted base. The claims affected are only
+the exact rationals in the Section~\ref{sec:budget} table. Replacing
+\lean{native\_decide} with kernel-level \lean{decide} or \lean{norm\_num} would
+remove the dependency, and is worth doing.
+
+The audit reproduces in full:
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+lake build
+lake env lean AxiomAudit.lean
+\end{Verbatim}
+
+There are no occurrences of \lean{sorry} or \lean{admit} in the repository.
+
+\section{Reproducing}
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+lake exe cache get     # optional: prebuilt Mathlib oleans
+lake build             # library and diagnostic
+lake exe branch_flow_demo
+lake env lean AxiomAudit.lean
+\end{Verbatim}
+
+Toolchain is \lean{leanprover/lean4:v4.33.1} with Mathlib \lean{v4.33.1}.
+
+\section{Summary}
+
+The claim supported here is narrow and should be read narrowly. Given any
+nonnegative flow assignment and any nonnegative usefulness signal, whole-branch
+reinforcement with common decay is coherent: initialization stays positive
+above a floor, credit reaches every depth of a transported branch in one event,
+unused routes strictly decay without being deleted, larger useful gains
+strictly amplify relative conductivity, accumulated cost is monotone, and on
+one exact two-branch configuration the dynamics reverse a policy initialization
+in two rounds.
+
+Coherence is a precondition. It is not a result about search quality, and
+nothing above should be read as one. Whether the loop
+\begin{equation}
+  \text{policy prior} \rightarrow \text{branch flow} \rightarrow
+  \text{information} \rightarrow \text{conductivity} \rightarrow
+  \text{new branch flow}
+\end{equation}
+searches a game tree well is still open. The decisive test is likely the
+ablation that removes branch-wide credit in favour of endpoint-only credit. If
+crediting the whole transported branch does not improve regret per unit of
+cost, the main motivation for the design is absent.
+
+\begin{thebibliography}{9}
+
+\bibitem{nakagaki2000}
+T. Nakagaki, H. Yamada, \'A. T\'oth.
+\emph{Maze-solving by an amoeboid organism.}
+Nature \textbf{407}, 470 (2000).
+
+\bibitem{tero2007}
+A. Tero, R. Kobayashi, T. Nakagaki.
+\emph{A mathematical model for adaptive transport network in path finding by
+true slime mold.}
+Journal of Theoretical Biology \textbf{244}(4), 553--564 (2007).
+
+\bibitem{tero2010}
+A. Tero, S. Takagi, T. Saigusa, K. Ito, D. P. Bebber, M. D. Fricker,
+K. Yumiki, R. Kobayashi, T. Nakagaki.
+\emph{Rules for biologically inspired adaptive network design.}
+Science \textbf{327}(5964), 439--442 (2010).
+
+\end{thebibliography}
+
+\end{document}
