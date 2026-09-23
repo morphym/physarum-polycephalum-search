@@ -19,6 +19,11 @@
 
 \newcommand{\lean}[1]{\texttt{#1}}
 
+% Long Lean identifiers are unbreakable, so give TeX room rather than let them
+% run into the margin.
+\emergencystretch=3em
+\hbadness=10000
+
 \title{Physarum-Inspired Branch-Flow Search\\
 \large The machine-checked core of a self-organizing game-tree search}
 \author{}
@@ -37,12 +42,12 @@ initial conductivities, and no learned action decides where the next unit of
 computation goes.
 
 This document states what has been proved about that algorithm and nothing
-else. The Lean 4 development contains nineteen theorems. Fifteen are checked by
-the Lean kernel against its three standard axioms. Four are exact-rational
-computations discharged by \lean{native\_decide}, which also trusts the Lean
-compiler, and they are marked wherever they appear. Section~\ref{sec:notproved}
-lists what the formalization does not answer, including every question about
-playing strength.
+else. The Lean 4 development contains forty-two theorems. Thirty-eight are
+checked by the Lean kernel against its three standard axioms. Four are
+exact-rational computations discharged by \lean{native\_decide}, which also
+trusts the Lean compiler, and they are marked wherever they appear.
+Section~\ref{sec:notproved} lists what the formalization does not answer,
+including every question about playing strength.
 \end{abstract}
 
 \section{Scope}
@@ -54,8 +59,13 @@ The theorems cover the algebra of the search dynamics: how conductivities are
 initialized from a policy, how branch traffic is credited, how unused routes
 decay, and how cost accumulates. They hold for any flow assignment and any
 usefulness signal meeting the stated sign conditions. That generality is what
-makes them cheap to state, and it is also what limits them. No theorem here
-says the search plays well.
+makes them cheap to state, and it is also what limits them.
+
+Section~\ref{sec:flowmap} removes part of that generality by constructing the
+map $q = F(D)$ from conductivities to branch flows on a tree, and by proving
+conservation and coupling for it. The two halves are not yet joined: the credit
+theorems still quantify over an arbitrary flow rather than over the flows $F$
+produces. No theorem here says the search plays well.
 
 \section{Where the idea comes from}
 
@@ -198,6 +208,66 @@ to incoming traffic. It is conservation in the bookkeeping sense. It is not a
 derivation of Kirchhoff's law from a graph Laplacian, and it does not show that
 any particular flow solver produces a conserved field.
 
+\section{The flow map}
+\label{sec:flowmap}
+
+Everything above takes \lean{flow} as a free function. Nothing ties it to the
+conductivities, so those theorems hold for flow assignments that no
+conductivity field could produce. \lean{TrickyProof/FlowSolver.lean} supplies
+the map $q = F(D)$.
+
+On a tree the electrical problem is series-parallel, so $F$ has a closed form
+and needs no matrix inversion. Write $R(v)$ for the resistance from $v$ to
+ground and $s_e$ for the conductance of edge $e$ in series with the subtree
+under it. Then
+\begin{equation}
+  s_e = \frac{1}{1/D_e + R(\mathrm{head}\, e)},
+  \qquad
+  R(v) = \frac{1}{\sum_{e \in \mathrm{out}(v)} s_e},
+  \qquad
+  R(\mathrm{sink}) = 0 ,
+  \label{eq:solver}
+\end{equation}
+and current entering a node splits between its children in proportion to
+$s_e$. Composing the divider fractions down a branch gives
+\begin{equation}
+  q_b = I_0 \prod_{k=1}^{d} \sigma_{e_k},
+  \qquad
+  \sigma_e = \frac{s_e}{\sum_{e' \in \mathrm{out}(\mathrm{tail}\, e)} s_{e'}} .
+\end{equation}
+This is the structural analogue of the policy product
+$m_\theta(b) = \prod_k \pi_\theta(a_k \mid s_k)$, with one difference that
+matters. Each $\sigma_e$ depends on $R(\mathrm{head}\, e)$, so it depends on
+the whole subtree below the edge. The divider fractions are not local, and
+that non-locality is the coupling the design claims over per-edge counters.
+
+\lean{sinkFlows\_sum} states that all injected current reaches the sinks. It
+is the conservation law that \lean{branchFlow\_conservation\_at\_split}
+assumes, derived here from the definition of the solver, so it constrains $F$
+rather than describing an arbitrary flow.
+
+\lean{series\_strictAnti\_resistance} and \lean{sibling\_starvation} give the
+coupling, and \lean{subtree\_reinforcement\_starves\_sibling} combines them:
+lowering the resistance inside one subtree, without touching that subtree's
+root edge, strictly reduces a sibling's flow.
+
+\lean{reinforcing\_A\_starves\_B\_and\_C} is an exact instance. The tree is
+
+\begin{Verbatim}[fontsize=\small,xleftmargin=1em]
+root --1--> v --dA--> sink     (branch A)
+            v --dB--> sink     (branch B)
+root --1--> sink               (branch C)
+\end{Verbatim}
+
+At $d_A = d_B = 1$ the sink flows are $[1/5,\ 1/5,\ 3/5]$. Reinforcing A to
+$d_A = 9$ gives $[3/7,\ 1/21,\ 11/21]$. B falls, which is expected because it
+shares the prefix. C falls too, from $3/5$ to $11/21$, and C shares no edge
+with A. Incrementing independent per-edge counters cannot move C.
+
+The scope is trees. On a transposition DAG the Laplacian still determines the
+edge flow $Q_e$, but $Q_e = \sum_{b \ni e} q_b$ has many solutions, so the
+branch flows need an extra convention and the deposit rule inherits it.
+
 \section{Whole-branch credit, decay, and amplification}
 
 The single-event form isolates one transported branch.
@@ -338,10 +408,15 @@ engineering problem, so it is listed directly.
   field converges, that it concentrates on principal variations, or that the
   induced root decision approaches the minimax decision.
 
-  \item No flow solver. \lean{branchFlow\_conservation\_at\_split} is a
-  re-indexing identity over a given flow assignment. No graph-Laplacian solve
-  is formalized, and no result bounds the cost of computing the flow field,
-  which the loop needs every round and which comes out of the same budget.
+  \item The flow solver covers trees only. Section~\ref{sec:flowmap}
+  formalizes $F$ and derives conservation and coupling, but on a transposition
+  DAG the branch decomposition is not unique, and no result bounds the cost of
+  the solve, which the loop pays every round out of the same budget.
+
+  \item The two halves are not yet joined. \lean{BranchFlow} quantifies over an
+  arbitrary \lean{flow} and \lean{FlowSolver} constructs a particular one, and
+  nothing instantiates the first with the second. The credit theorems have not
+  been specialized to flows that $F$ can produce.
 
   \item No adversarial backup. Minimax, alpha-beta bounds, and the separation
   between the flow potential $p_v$ and the game value $V(v)$ are part of the
@@ -360,8 +435,9 @@ engineering problem, so it is listed directly.
 \section{Trusted computing base}
 \label{sec:tcb}
 
-The fifteen theorems in \lean{TrickyProof/BranchFlow.lean} depend on Lean's
-three standard axioms and nothing else:
+The thirty-eight library theorems, in \lean{BranchFlow.lean} and
+\lean{FlowSolver.lean}, depend on Lean's three standard axioms and nothing
+else:
 
 \begin{Verbatim}[fontsize=\small,xleftmargin=1em]
 propext, Classical.choice, Quot.sound

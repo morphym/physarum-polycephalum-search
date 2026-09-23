@@ -26,7 +26,7 @@ The paper is [`whitepaper.tex`](whitepaper.tex), built as
 
 ## What is proved
 
-Nineteen theorems, in two groups.
+Forty-two theorems, in three groups.
 
 Fifteen in `TrickyProof/BranchFlow.lean`, checked by the Lean kernel:
 
@@ -55,6 +55,58 @@ and the move would be gone from the search for good. `evolve_positive` says the
 update never drives an edge to zero either, so decay suppresses a route rather
 than deleting it, and a faded route can come back.
 
+### The flow map
+
+Those fifteen take branch flow as a free function, so nothing ties it to the
+conductivities and they hold for flow assignments no conductivity field could
+produce. `TrickyProof/FlowSolver.lean` supplies the missing map `q = F(D)`.
+
+On a tree the electrical problem is series-parallel, so it has a closed form
+and needs no matrix inversion. With `R(v)` the resistance from `v` to ground
+and `s_e` the conductance of edge `e` in series with the subtree under it:
+
+```
+s_e = 1 / (1/D_e + R(head e)),    R(v) = 1 / sum of s_e over e out of v,    R(sink) = 0
+```
+
+Current entering a node splits between children in proportion to `s_e`.
+
+Twenty-three theorems, nine of them definitional unfolding lemmas. The ones
+that carry content:
+
+| Theorem | Statement |
+| --- | --- |
+| `resistance_nonneg` | resistance to ground is nonnegative |
+| `totalConductance_pos` | a node with a child has positive total conductance |
+| `seriesConductance_pos` | a positive edge in series with a subtree is positive |
+| `sinkFlows_sum` | all injected current reaches the sinks |
+| `sinkFlowsAux_sum` | a node splits its inflow into exactly its inflow |
+| `sinkFlows_two_sinks` | the two-child split, written out |
+| `series_strictAnti_resistance` | lowering resistance below an edge strictly raises that edge's share |
+| `sibling_starvation` | raising one branch's series conductance strictly starves its sibling |
+| `subtree_reinforcement_starves_sibling` | the same, when the reinforcement is deep inside the subtree |
+| `reinforcing_A_starves_B_and_C` | exact-rational instance on a shared-prefix tree |
+
+`sinkFlows_sum` is the conservation law that `branchFlow_conservation_at_split`
+assumes rather than derives. Here it is derived from the definition of the
+solver, so it constrains `F` instead of describing an arbitrary flow.
+
+`reinforcing_A_starves_B_and_C` is the coupling. The tree is
+
+```
+root --1--> v --dA--> sink     (branch A)
+            v --dB--> sink     (branch B)
+root --1--> sink               (branch C)
+```
+
+At `dA = dB = 1` the flows are `[1/5, 1/5, 3/5]`. Reinforcing A to `dA = 9`
+gives `[3/7, 1/21, 11/21]`. B drops, which is expected since it shares the
+prefix. C also drops, from `3/5` to `11/21`, and C shares no edge with A at
+all. Incrementing independent per-edge counters cannot move C. That difference
+is the reason for solving the flow field instead of counting visits.
+
+### The diagnostic
+
 Four more in `BranchFlowMain.lean`. That file is a diagnostic, it runs the
 dynamics on the smallest setup that can show the intended behaviour. Branch A
 is two edges deep, branch B is one edge, and the policy prefers B, so B starts
@@ -79,8 +131,19 @@ kernel.
 
 No theorem here says the search plays well. There is nothing about playing
 strength, nothing about the usefulness function `U_b` past it being
-nonnegative, nothing about convergence, no flow solver, and no adversarial
-backup. Section 9 of the whitepaper lists all of it.
+nonnegative, nothing about convergence, and no adversarial backup. Section 9
+of the whitepaper lists all of it.
+
+The flow map is formalized for trees only. On a transposition DAG the edge
+flow is still determined by the Laplacian, but it no longer decomposes
+uniquely into branch flows, so `F` would need an extra convention and the
+deposit rule would inherit it. Nothing here bounds the cost of the solve
+either, and the search pays that cost out of the same budget every round.
+
+The two halves are also still separate. `BranchFlow` quantifies over an
+arbitrary `flow`, and `FlowSolver` builds a particular one. Nothing yet
+instantiates the first with the second, so the credit theorems have not been
+specialized to flows that `F` can actually produce.
 
 The `|P_b|` factor in `whole_branch_credit` is worth calling out, because it is
 easy to misread. A longer branch soaks up proportionally more total deposit,
@@ -102,8 +165,8 @@ know.
 
 ## Trusted computing base
 
-The fifteen library theorems depend on Lean's three standard axioms and nothing
-else:
+The thirty-eight library theorems depend on Lean's three standard axioms and
+nothing else:
 
 ```
 propext, Classical.choice, Quot.sound
