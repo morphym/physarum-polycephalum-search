@@ -21,7 +21,9 @@ jobs:
 
       - name: Reject sorry and admit
         run: |
-          if grep -rn --include='*.lean' -E '\b(sorry|admit)\b' . ; then
+          # Only this repository's own sources; .lake holds the Mathlib
+          # checkout, which legitimately contains both words.
+          if git ls-files '*.lean' | xargs grep -nE '\b(sorry|admit)\b' ; then
             echo "found sorry or admit"
             exit 1
           fi
